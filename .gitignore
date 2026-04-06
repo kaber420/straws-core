@@ -1,37 +1,22 @@
-# Binarios y ejecutables
+# Binarios
 bin/
 straws-core
 straws-proxy
-strawslite-engine
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+straws-engine
 
-# Base de datos local
+# Bases de datos y archivos temporales
 *.db
 *.db-journal
-
-# Certificados y llaves (¡Crítico!)
-certs/**.pem
-certs/**.key
-certs/**.crt
-certs/**.csr
-*.pem
-*.key
-*.crt
-
-# Dependencias de Go
-vendor/
-
-# Logs
 *.log
 
-# Configuraciones de editores
+# Certificados y llaves (Ignorar todo lo sensible)
+certs/*.key
+certs/*.crt
+certs/*.pem
+certs/*.csr
+certs/*.ext
+certs/*.srl
+
+# Editor
 .vscode/
 .idea/
-.env
-node_modules/
-*.ext
-*.srl
