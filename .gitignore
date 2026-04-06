@@ -33,3 +33,5 @@ vendor/
 .idea/
 .env
 node_modules/
+*.ext
+*.srl
