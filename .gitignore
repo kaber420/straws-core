@@ -1,0 +1,22 @@
+# Binarios
+bin/
+straws-core
+straws-proxy
+straws-engine
+
+# Bases de datos y archivos temporales
+*.db
+*.db-journal
+*.log
+
+# Certificados y llaves (Ignorar todo lo sensible)
+certs/*.key
+certs/*.crt
+certs/*.pem
+certs/*.csr
+certs/*.ext
+certs/*.srl
+
+# Editor
+.vscode/
+.idea/
