@@ -14,10 +14,10 @@ strawslite-engine
 *.db-journal
 
 # Certificados y llaves (¡Crítico!)
-certs/*.pem
-certs/*.key
-certs/*.crt
-certs/*.csr
+certs/**.pem
+certs/**.key
+certs/**.crt
+certs/**.csr
 *.pem
 *.key
 *.crt
