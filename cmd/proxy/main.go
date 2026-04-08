@@ -63,7 +63,7 @@ func main() {
 	log.Printf("Final certsDir discovery: %s", finalCertsDir)
 
 	registerFlag := flag.Bool("register", false, "Register the host in the browser's native messaging manifests")
-	portFlag := flag.String("port", "5782", "Port for the proxy server to listen on")
+	portFlag := flag.String("port", "5783", "Port for the proxy server to listen on")
 	certsDirFlag := flag.String("certs-dir", certsDir, "Directory containing .crt and .key files for legal domains")
 	flag.Parse()
 
@@ -165,6 +165,7 @@ func run(port, certsDir, exePath string) {
 		var cmd struct {
 			Command string            `json:"command"`
 			Enabled bool              `json:"enabled"`
+			Domain  string            `json:"domain"`
 			Rules   []proxy.ProxyRule `json:"rules"`
 		}
 		if err := json.Unmarshal(payload, &cmd); err == nil {
@@ -183,6 +184,22 @@ func run(port, certsDir, exePath string) {
 				resp, _ := json.Marshal(map[string]interface{}{
 					"type":  "certs_list",
 					"certs": certs,
+				})
+				nativeproto.WriteMessage(os.Stdout, resp)
+			case "delete_cert":
+				domain := cmd.Domain
+				log.Printf("Extension requested deletion of cert: %s", domain)
+				err := p.DeleteCertificate(domain)
+				success := (err == nil)
+				msg := "Certificate deleted"
+				if err != nil {
+					msg = "Error: " + err.Error()
+				}
+				resp, _ := json.Marshal(map[string]interface{}{
+					"type":    "delete_response",
+					"success": success,
+					"message": msg,
+					"domain":  domain,
 				})
 				nativeproto.WriteMessage(os.Stdout, resp)
 			}

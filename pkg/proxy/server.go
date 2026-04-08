@@ -213,6 +213,31 @@ func (p *ProxyServer) GetAvailableCerts() []string {
 	return names
 }
 
+func (p *ProxyServer) DeleteCertificate(domain string) error {
+	p.rulesMu.Lock()
+	defer p.rulesMu.Unlock()
+
+	// 1. Remove from memory
+	delete(p.certificates, domain)
+	
+	// 2. Remove from disk if exists
+	crtPath := filepath.Join(p.CertsDir, domain+".crt")
+	keyPath := filepath.Join(p.CertsDir, domain+".key")
+	
+	errCrt := os.Remove(crtPath)
+	errKey := os.Remove(keyPath)
+	
+	if errCrt != nil && !os.IsNotExist(errCrt) {
+		return errCrt
+	}
+	if errKey != nil && !os.IsNotExist(errKey) {
+		return errKey
+	}
+	
+	log.Printf("Certificate for %s deleted successfully", domain)
+	return nil
+}
+
 func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	if strings.Contains(host, ":") {
@@ -255,11 +280,44 @@ func (p *ProxyServer) handleReverseProxy(w http.ResponseWriter, r *http.Request,
 	}
 	formattedReqBody := formatBody(reqBody, reqContentType)
 
+	if p.LoggingEnabled && p.OnEvent != nil {
+		p.OnEvent(map[string]interface{}{
+			"type":   "http_start",
+			"url":    r.URL.String(),
+			"method": r.Method,
+			"from":   "Straws Engine",
+		})
+	}
+
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			req.URL.Scheme = "http"
+			// Maintain the scheme (http or https) decided by the handler
+			if req.URL.Scheme == "" {
+				req.URL.Scheme = "http"
+			}
 			req.URL.Host = targetHost
 			req.Host = r.Host
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("DEBUG: handleReverseProxy Error: %v", err)
+			w.WriteHeader(http.StatusBadGateway)
+			
+			event := map[string]interface{}{
+				"type":    "http",
+				"url":     r.URL.String(),
+				"method":  r.Method,
+				"status":  http.StatusBadGateway,
+				"error":   err.Error(),
+				"latency": time.Since(start).String(),
+				"headers": map[string]interface{}{
+					"request": r.Header,
+				},
+				"payload": formattedReqBody,
+				"from": "Straws Engine",
+			}
+			if p.LoggingEnabled && p.OnEvent != nil {
+				p.OnEvent(event)
+			}
 		},
 		ModifyResponse: func(res *http.Response) error {
 			latency := time.Since(start).String()
@@ -367,18 +425,43 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request, rule
 		
 		// Run in a goroutine to handle multiple requests (Keep-alive)
 		go func() {
-			// CRITICAL: We NO LONGER defer tlsConn.Close() here.
-			// server.Serve will return as soon as its singleConnListener is exhausted,
-			// but we need the connection to stay open while the Handler is processing.
-			// the http.Server will close the connection when it's done.
+			// Extract TLS metadata for the Handshake Inspector
+			if err := tlsConn.Handshake(); err == nil {
+				state := tlsConn.ConnectionState()
+				peerCerts := len(state.PeerCertificates)
+				
+				event := map[string]interface{}{
+					"type": "tls",
+					"host": host,
+					"tls": map[string]interface{}{
+						"sni":                 state.ServerName,
+						"tls_version":         getTLSVersionName(state.Version),
+						"cipher_suite":        getCipherSuiteName(state.CipherSuite),
+						"negotiated_protocol": state.NegotiatedProtocol,
+						"peer_certs":          peerCerts,
+					},
+					"from": "Straws Engine",
+				}
+				if p.LoggingEnabled && p.OnEvent != nil {
+					p.OnEvent(event)
+				}
+			} else {
+				log.Printf("DEBUG: handleConnect: TLS Handshake failed for %s: %v", host, err)
+				if p.LoggingEnabled && p.OnEvent != nil {
+					p.OnEvent(map[string]interface{}{
+						"type": "error",
+						"from": "Straws Engine",
+						"message": fmt.Sprintf("TLS Handshake failure for %s: %v", host, err),
+					})
+				}
+				tlsConn.Close()
+				return
+			}
 
-			log.Printf("DEBUG: handleConnect: TLS Handshake started for %s...", host)
-			
-			// We use a simple server to handle the decrypted traffic
+			listener := &singleConnListener{conn: tlsConn}
 			server := &http.Server{
 				Handler: http.HandlerFunc(func(sw http.ResponseWriter, sr *http.Request) {
 					log.Printf("DEBUG: handleConnect: Decrypted request received for %s %s", sr.Method, sr.URL.String())
-					// Fix request URL for the reverse proxy
 					if sr.URL.Host == "" {
 						sr.URL.Host = host
 						sr.URL.Scheme = "https"
@@ -388,8 +471,7 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request, rule
 				ErrorLog: log.New(io.Discard, "", 0),
 			}
 			
-			// Serve exactly one connection (the hijacked one)
-			if err := server.Serve(&singleConnListener{conn: tlsConn}); err != nil && err != io.EOF {
+			if err := server.Serve(listener); err != nil && err != io.EOF {
 				log.Printf("DEBUG: handleConnect: TLS Proxy Server Error: %v", err)
 			}
 		}()
@@ -404,21 +486,35 @@ func (p *ProxyServer) handleConnect(w http.ResponseWriter, r *http.Request, rule
 // Helper to serve a single hijacked connection
 type singleConnListener struct {
 	conn net.Conn
+	done chan struct{}
 	once sync.Once
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
 	var c net.Conn
 	l.once.Do(func() {
+		l.done = make(chan struct{})
 		c = l.conn
 	})
-	if c == nil {
-		return nil, io.EOF
+	if c != nil {
+		return c, nil
 	}
-	return c, nil
+	<-l.done
+	return nil, io.EOF
 }
 
-func (l *singleConnListener) Close() error   { return nil }
+func (l *singleConnListener) Close() error {
+	l.once.Do(func() {
+		l.done = make(chan struct{})
+	})
+	select {
+	case <-l.done:
+	default:
+		close(l.done)
+	}
+	return nil
+}
+
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 func isTextual(contentType string) bool {
@@ -445,4 +541,33 @@ func formatBody(body []byte, contentType string) string {
 		return fmt.Sprintf("(Binary Data: %s, %d bytes)", contentType, len(body))
 	}
 	return string(body)
+}
+
+func getTLSVersionName(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("Unknown (0x%04X)", version)
+	}
+}
+
+func getCipherSuiteName(id uint16) string {
+	for _, suite := range tls.CipherSuites() {
+		if suite.ID == id {
+			return suite.Name
+		}
+	}
+	for _, suite := range tls.InsecureCipherSuites() {
+		if suite.ID == id {
+			return suite.Name + " (Insecure)"
+		}
+	}
+	return fmt.Sprintf("Unknown (0x%04X)", id)
 }
