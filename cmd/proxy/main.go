@@ -20,7 +20,8 @@ func main() {
 	exePath, _ := os.Executable()
 	exeDir := filepath.Dir(exePath)
 	
-	f, _ := os.OpenFile("/tmp/straws_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logPath := filepath.Join(exeDir, "engine.log")
+	f, _ := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	log.SetOutput(f)
 	log.Printf("--- Straws Engine Started at %v ---", filepath.Base(exePath))
 	
@@ -163,15 +164,21 @@ func run(port, certsDir, exePath string) {
 		}
 		
 		var cmd struct {
-			Command string            `json:"command"`
-			Enabled bool              `json:"enabled"`
-			Domain  string            `json:"domain"`
-			Rules   []proxy.ProxyRule `json:"rules"`
+			Command   string            `json:"command"`
+			Enabled   bool              `json:"enabled"`
+			Domain    string            `json:"domain"`
+			TabID     int               `json:"tabId"`
+			Container string            `json:"container"`
+			Mode      string            `json:"mode"`
+			ValueMs   int               `json:"valueMs"`
+			Rules     []proxy.ProxyRule `json:"rules"`
 		}
 		if err := json.Unmarshal(payload, &cmd); err == nil {
 			switch cmd.Command {
 			case "sync_rules":
 				p.UpdateRules(cmd.Rules)
+			case "sync_chaos":
+				p.UpdateChaosMode(cmd.TabID, cmd.Container, cmd.Mode, cmd.ValueMs)
 			case "set_logging":
 				p.LoggingEnabled = cmd.Enabled
 				log.Printf("Logging status changed to: %v", p.LoggingEnabled)
